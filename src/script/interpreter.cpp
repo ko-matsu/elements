@@ -1607,6 +1607,44 @@ void PrecomputedTransactionData::Init(const T& txTo, std::vector<CTxOut> spent_o
     m_spent_outputs = std::move(spent_outputs);
 
     if (ready) return;
+
+    if (g_con_elementsmode && !m_spent_outputs.empty()) {
+        std::vector<rawInput> simplicityRawInput(txTo.vin.size());
+        for (size_t i = 0; i < txTo.vin.size(); ++i) {
+            simplicityRawInput[i].prevTxid = txTo.vin[i].prevout.hash.begin(); /* :TODO: prevTxid ought to be unsigned char because that is what begin() returns. */
+            simplicityRawInput[i].prevIx = txTo.vin[i].prevout.n;
+            simplicityRawInput[i].sequence = txTo.vin[i].nSequence;
+            simplicityRawInput[i].txo.asset = m_spent_outputs[i].nAsset.vchCommitment.data();
+            simplicityRawInput[i].txo.value = m_spent_outputs[i].nValue.vchCommitment.data();
+            simplicityRawInput[i].txo.scriptPubKey.code = m_spent_outputs[i].scriptPubKey.data();
+            simplicityRawInput[i].txo.scriptPubKey.len = m_spent_outputs[i].scriptPubKey.size();
+            simplicityRawInput[i].isPegin = txTo.vin[i].m_is_pegin;
+            simplicityRawInput[i].issuance.blindingNonce = txTo.vin[i].assetIssuance.assetBlindingNonce.begin(); /* :TODO: also ought to be unsigned cahr */
+            simplicityRawInput[i].issuance.assetEntropy = txTo.vin[i].assetIssuance.assetEntropy.begin(); /* :TODO: also ought to be unsigned char */
+            simplicityRawInput[i].issuance.amount = txTo.vin[i].assetIssuance.nAmount.vchCommitment.data();
+            simplicityRawInput[i].issuance.inflationKeys = txTo.vin[i].assetIssuance.nInflationKeys.vchCommitment.data();
+        }
+
+        std::vector<rawOutput> simplicityRawOutput(txTo.vout.size());
+        for (size_t i = 0; i < txTo.vout.size(); ++i) {
+            simplicityRawOutput[i].asset = txTo.vout[i].nAsset.vchCommitment.data();
+            simplicityRawOutput[i].value = txTo.vout[i].nValue.vchCommitment.data();
+            simplicityRawOutput[i].nonce = txTo.vout[i].nNonce.vchCommitment.data();
+            simplicityRawOutput[i].scriptPubKey.code = txTo.vout[i].scriptPubKey.data();
+            simplicityRawOutput[i].scriptPubKey.len = txTo.vout[i].scriptPubKey.size();
+        }
+
+        rawTransaction simplicityRawTx;
+        simplicityRawTx.input = simplicityRawInput.data();
+        simplicityRawTx.numInputs = simplicityRawInput.size();
+        simplicityRawTx.output = simplicityRawOutput.data();
+        simplicityRawTx.numOutputs = simplicityRawOutput.size();
+        simplicityRawTx.version = txTo.nVersion;
+        simplicityRawTx.lockTime = txTo.nLockTime;
+
+        simplicityTxData = elements_simplicity_mallocTransaction(&simplicityRawTx);
+    }
+
     // Cache is calculated only for transactions with witness
     if (txTo.HasWitness()) {
         hashPrevouts = GetPrevoutHash(txTo);
@@ -1826,6 +1864,40 @@ bool GenericTransactionSignatureChecker<T>::CheckSequence(const CScriptNum& nSeq
     return true;
 }
 
+template <class T>
+bool GenericTransactionSignatureChecker<T>::CheckSimplicity(const CScriptWitness& witness, const std::vector<unsigned char>& program, ScriptError* serror) const
+{
+    if (witness.stack.size() != 1) return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH);
+
+    bool success;
+    const std::vector<unsigned char> &simplicityWitness = witness.stack[0];
+    FILE* file = fmemopen((void *)simplicityWitness.data(), simplicityWitness.size(), "rb"); /* Casting away const. */
+
+    assert(txdata->simplicityTxData);
+    const uint32_t cmr[8] = { program[0] << 24 | program[1] << 16 | program[2] << 8 | program[3]  // :TODO: have elements_simplicity_execSimplicity take an array of unsigned char for CMR and WMRs
+                            , program[4] << 24 | program[5] << 16 | program[6] << 8 | program[7]
+                            , program[8] << 24 | program[9] << 16 | program[10] << 8 | program[11]
+                            , program[12] << 24 | program[13] << 16 | program[14] << 8 | program[15]
+                            , program[16] << 24 | program[17] << 16 | program[18] << 8 | program[19]
+                            , program[20] << 24 | program[21] << 16 | program[22] << 8 | program[23]
+                            , program[24] << 24 | program[25] << 16 | program[26] << 8 | program[27]
+                            , program[28] << 24 | program[29] << 16 | program[30] << 8 | program[31]
+                            };
+    if (!elements_simplicity_execSimplicity(&success, txdata->simplicityTxData, nIn, cmr, 0, file)) {
+        fprintf(stderr, "Unexpected failure of elements_simplicity_execSimplicity.\n");
+        if (file) fclose(file);
+        abort();
+    }
+
+    fclose(file);
+
+    if (success) {
+        return set_success(serror);
+    } else {
+        return set_error(serror, SCRIPT_ERR_EVAL_FALSE);
+    }
+}
+
 // explicit instantiation
 template class GenericTransactionSignatureChecker<CTransaction>;
 template class GenericTransactionSignatureChecker<CMutableTransaction>;
@@ -1858,6 +1930,8 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
         } else {
             return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_WRONG_LENGTH);
         }
+    } else if ((flags & SCRIPT_VERIFY_SIMPLICITY) && witversion == 31 && program.size() == 32) {
+        return checker.CheckSimplicity(witness, program, serror);
     } else if (flags & SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM) {
         return set_error(serror, SCRIPT_ERR_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM);
     } else {
