@@ -2591,9 +2591,15 @@ bool CWallet::SelectCoinsMinConf(const CAmountMap& mapTargetValue, const CoinEli
         CCoinControl temp;
         temp.m_confirm_target = 1008;
         CFeeRate long_term_feerate = GetMinimumFeeRate(*this, temp, ::mempool, ::feeEstimator, &feeCalc);
+        WalletLogPrintf("long_term_feerate=%s\n", long_term_feerate.ToString().c_str());
 
         // Calculate cost of change
-        CAmount cost_of_change = GetDiscardRate(*this, ::feeEstimator).GetFee(coin_selection_params.change_spend_size) + coin_selection_params.effective_fee.GetFee(coin_selection_params.change_output_size);
+        CFeeRate discard_rate = GetDiscardRate(*this, ::feeEstimator);
+        CAmount cost_of_change = discard_rate.GetFee(coin_selection_params.change_spend_size) + coin_selection_params.effective_fee.GetFee(coin_selection_params.change_output_size);
+        WalletLogPrintf("effective_fee=%s\n", coin_selection_params.effective_fee.ToString().c_str());
+        WalletLogPrintf("discard_feerate=%s\n", discard_rate.ToString().c_str());
+        WalletLogPrintf("cost_of_change=%lu\n", cost_of_change);
+        // CAmount cost_of_change = GetDiscardRate(*this, ::feeEstimator).GetFee(coin_selection_params.change_spend_size) + coin_selection_params.effective_fee.GetFee(coin_selection_params.change_output_size);
 
         // Filter by the min conf specs and add to utxo_pool and calculate effective value
         for (OutputGroup& group : asset_groups) {
@@ -2619,6 +2625,7 @@ bool CWallet::SelectCoinsMinConf(const CAmountMap& mapTargetValue, const CoinEli
         }
         // Calculate the fees for things that aren't inputs
         CAmount not_input_fees = coin_selection_params.effective_fee.GetFee(coin_selection_params.tx_noinputs_size);
+        WalletLogPrintf("not_input_fees=%lu\n", not_input_fees);
         bnb_used = true;
         CAmount nValueRet;
         bool ret = SelectCoinsBnB(utxo_pool, nTargetValue, cost_of_change, setCoinsRet, nValueRet, not_input_fees);
