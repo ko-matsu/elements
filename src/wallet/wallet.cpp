@@ -2596,6 +2596,8 @@ bool CWallet::SelectCoinsMinConf(const CAmountMap& mapTargetValue, const CoinEli
         // Calculate cost of change
         CFeeRate discard_rate = GetDiscardRate(*this, ::feeEstimator);
         CAmount cost_of_change = discard_rate.GetFee(coin_selection_params.change_spend_size) + coin_selection_params.effective_fee.GetFee(coin_selection_params.change_output_size);
+        WalletLogPrintf("change_spend_size=%lu\n", coin_selection_params.change_spend_size);
+        WalletLogPrintf("change_output_size=%lu\n", coin_selection_params.change_output_size);
         WalletLogPrintf("effective_fee=%s\n", coin_selection_params.effective_fee.ToString().c_str());
         WalletLogPrintf("discard_feerate=%s\n", discard_rate.ToString().c_str());
         WalletLogPrintf("cost_of_change=%lu\n", cost_of_change);
@@ -2625,6 +2627,7 @@ bool CWallet::SelectCoinsMinConf(const CAmountMap& mapTargetValue, const CoinEli
         }
         // Calculate the fees for things that aren't inputs
         CAmount not_input_fees = coin_selection_params.effective_fee.GetFee(coin_selection_params.tx_noinputs_size);
+        WalletLogPrintf("tx_noinputs_size=%lu\n", coin_selection_params.tx_noinputs_size);
         WalletLogPrintf("not_input_fees=%lu\n", not_input_fees);
         bnb_used = true;
         CAmount nValueRet;
