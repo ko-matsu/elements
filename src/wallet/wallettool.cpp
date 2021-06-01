@@ -8,6 +8,8 @@
 #include <util/system.h>
 #include <wallet/wallet.h>
 #include <wallet/walletutil.h>
+#include <key_io.h>
+#include <util/bip32.h>
 
 namespace WalletTool {
 
@@ -104,6 +106,126 @@ static void WalletShowInfo(CWallet* wallet_instance)
     tfm::format(std::cout, "Address Book: %zu\n", wallet_instance->mapAddressBook.size());
 }
 
+std::string static EncodeDumpString(const std::string &str) {
+    std::stringstream ret;
+    for (const unsigned char c : str) {
+        if (c <= 32 || c >= 128 || c == '%') {
+            ret << '%' << HexStr(&c, &c + 1);
+        } else {
+            ret << c;
+        }
+    }
+    return ret.str();
+}
+
+static bool GetWalletAddressesForKey(CWallet* const pwallet, const CKeyID& keyid, std::string& strAddr, std::string& strLabel) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet)
+{
+    bool fLabelFound = false;
+    CKey key;
+    pwallet->GetKey(keyid, key);
+    for (const auto& dest : GetAllDestinationsForKey(key.GetPubKey())) {
+        if (pwallet->mapAddressBook.count(dest)) {
+            if (!strAddr.empty()) {
+                strAddr += ",";
+            }
+            strAddr += EncodeDestination(dest);
+            strLabel = EncodeDumpString(pwallet->mapAddressBook[dest].name);
+            fLabelFound = true;
+        }
+    }
+    if (!fLabelFound) {
+        strAddr = EncodeDestination(GetDestinationForKey(key.GetPubKey(), pwallet->m_default_address_type));
+    }
+    return fLabelFound;
+}
+
+static void WalletDumpKey(CWallet* pwallet)
+{
+    auto locked_chain = pwallet->chain().lock();
+    LOCK(pwallet->cs_wallet);
+
+    std::map<CTxDestination, int64_t> mapKeyBirth;
+    const std::map<CKeyID, int64_t>& mapKeyPool = pwallet->GetAllReserveKeys();
+    pwallet->GetKeyBirthTimes(*locked_chain, mapKeyBirth);
+
+    std::set<CScriptID> scripts = pwallet->GetCScripts();
+    // TODO: include scripts in GetKeyBirthTimes() output instead of separate
+
+    // sort time/key pairs
+    std::vector<std::pair<int64_t, CKeyID> > vKeyBirth;
+    for (const auto& entry : mapKeyBirth) {
+        if (const PKHash* keyID = boost::get<PKHash>(&entry.first)) { // set and test
+            vKeyBirth.push_back(std::make_pair(entry.second, CKeyID(*keyID)));
+        }
+    }
+    mapKeyBirth.clear();
+    std::sort(vKeyBirth.begin(), vKeyBirth.end());
+
+    // produce output
+    std::cout << strprintf("# Wallet dump created by Bitcoin %s\n", CLIENT_BUILD);
+    std::cout << strprintf("# * Created on %s\n", FormatISO8601DateTime(GetTime()));
+    const Optional<int> tip_height = locked_chain->getHeight();
+    std::cout << strprintf("# * Best block at time of backup was %i (%s),\n", tip_height.get_value_or(-1), tip_height ? locked_chain->getBlockHash(*tip_height).ToString() : "(missing block hash)");
+    std::cout << strprintf("#   mined on %s\n", tip_height ? FormatISO8601DateTime(locked_chain->getBlockTime(*tip_height)) : "(missing block time)");
+    std::cout << "\n";
+
+    // add the base58check encoded extended master if the wallet uses HD
+    CKeyID seed_id = pwallet->GetHDChain().seed_id;
+    if (!seed_id.IsNull())
+    {
+        CKey seed;
+        if (pwallet->GetKey(seed_id, seed)) {
+            CExtKey masterKey;
+            masterKey.SetSeed(seed.begin(), seed.size());
+
+            std::cout << "# extended private masterkey: " << EncodeExtKey(masterKey) << "\n\n";
+        }
+    }
+    // ELEMENTS: Dump the master blinding key in hex as well
+    if (!pwallet->blinding_derivation_key.IsNull()) {
+        std::cout << ("# Master private blinding key: " + HexStr(pwallet->blinding_derivation_key) + "\n\n");
+    }
+    for (std::vector<std::pair<int64_t, CKeyID> >::const_iterator it = vKeyBirth.begin(); it != vKeyBirth.end(); it++) {
+        const CKeyID &keyid = it->second;
+        std::string strTime = FormatISO8601DateTime(it->first);
+        std::string strAddr;
+        std::string strLabel;
+        CKey key;
+        if (pwallet->GetKey(keyid, key)) {
+            std::cout << strprintf("%s %s ", EncodeSecret(key), strTime);
+            if (GetWalletAddressesForKey(pwallet, keyid, strAddr, strLabel)) {
+               std::cout << strprintf("label=%s", strLabel);
+            } else if (keyid == seed_id) {
+                std::cout << "hdseed=1";
+            } else if (mapKeyPool.count(keyid)) {
+                std::cout << "reserve=1";
+            } else if (pwallet->mapKeyMetadata[keyid].hdKeypath == "s") {
+                std::cout << "inactivehdseed=1";
+            } else {
+                std::cout << "change=1";
+            }
+            std::cout << strprintf(" # addr=%s%s\n", strAddr, (pwallet->mapKeyMetadata[keyid].has_key_origin ? " hdkeypath="+WriteHDKeypath(pwallet->mapKeyMetadata[keyid].key_origin.path) : ""));
+        }
+    }
+    std::cout << "\n";
+    for (const CScriptID &scriptid : scripts) {
+        CScript script;
+        std::string create_time = "0";
+        std::string address = EncodeDestination(ScriptHash(scriptid));
+        // get birth times for scripts with metadata
+        auto it = pwallet->m_script_metadata.find(scriptid);
+        if (it != pwallet->m_script_metadata.end()) {
+            create_time = FormatISO8601DateTime(it->second.nCreateTime);
+        }
+        if(pwallet->GetCScript(scriptid, script)) {
+            std::cout << strprintf("%s %s script=1", HexStr(script.begin(), script.end()), create_time);
+            std::cout << strprintf(" # addr=%s\n", address);
+        }
+    }
+    std::cout << "\n";
+    std::cout << "# End of dump\n";
+}
+
 bool ExecuteWalletToolFunc(const std::string& command, const std::string& name)
 {
     fs::path path = fs::absolute(name, GetWalletDir());
@@ -127,6 +249,20 @@ bool ExecuteWalletToolFunc(const std::string& command, const std::string& name)
         std::shared_ptr<CWallet> wallet_instance = LoadWallet(name, path);
         if (!wallet_instance) return false;
         WalletShowInfo(wallet_instance.get());
+        wallet_instance->Flush(true);
+    } else if (command == "dump") {
+        if (!fs::exists(path)) {
+            tfm::format(std::cerr, "Error: no wallet file at %s\n", name.c_str());
+            return false;
+        }
+        std::string error;
+        if (!WalletBatch::VerifyEnvironment(path, error)) {
+            tfm::format(std::cerr, "Error loading %s. Is wallet being used by other process?\n", name.c_str());
+            return false;
+        }
+        std::shared_ptr<CWallet> wallet_instance = LoadWallet(name, path);
+        if (!wallet_instance) return false;
+        WalletDumpKey(wallet_instance.get());
         wallet_instance->Flush(true);
     } else {
         tfm::format(std::cerr, "Invalid command: %s\n", command.c_str());
