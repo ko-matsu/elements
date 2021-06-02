@@ -174,7 +174,9 @@ static void WalletDumpKey(CWallet* pwallet)
     if (!seed_id.IsNull())
     {
         CKey seed;
+        std::cout << strprintf("# seed id: %s \n\n", seed_id.GetHex());
         if (pwallet->GetKey(seed_id, seed)) {
+            std::cout << strprintf("# seed: %s \n\n", EncodeSecret(seed));
             CExtKey masterKey;
             masterKey.SetSeed(seed.begin(), seed.size());
 
@@ -222,6 +224,18 @@ static void WalletDumpKey(CWallet* pwallet)
             std::cout << strprintf(" # addr=%s\n", address);
         }
     }
+    std::cout << "\n";
+
+    // std::map<CTxDestination, std::vector<COutput>>
+    auto coins = pwallet->CWallet::ListCoins(*locked_chain);
+    std::cout << "# Coins:\n";
+    for (const auto& pair : coins) {
+        std::string address = EncodeDestination(pair.first);
+        for (const auto& output : pair.second) {
+            std::cout << strprintf(" # addr=%s, output=%s \n", address, output.ToString());
+        }
+    }
+
     std::cout << "\n";
     std::cout << "# End of dump\n";
 }
